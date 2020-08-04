@@ -26,7 +26,9 @@
 #import "ForgotPasswordInputsView.h"
 #import "AuthFallBackViewController.h"
 
-@interface AuthenticationViewController () <AuthFallBackViewControllerDelegate, KeyVerificationCoordinatorBridgePresenterDelegate>
+#import "Riot-Swift.h"
+
+@interface AuthenticationViewController () <AuthFallBackViewControllerDelegate, KeyVerificationCoordinatorBridgePresenterDelegate, SetPinCoordinatorBridgePresenterDelegate>
 {
     /**
      The default country code used to initialize the mobile phone number input.
@@ -49,10 +51,14 @@
     MXAutoDiscovery *autoDiscovery;
 
     AuthFallBackViewController *authFallBackViewController;
+    
+    // successful login credentials
+    MXCredentials *loginCredentials;
 }
 
 @property (nonatomic, readonly) BOOL isIdentityServerConfigured;
 @property (nonatomic, strong) KeyVerificationCoordinatorBridgePresenter *keyVerificationCoordinatorBridgePresenter;
+@property (nonatomic, strong) SetPinCoordinatorBridgePresenter *setPinCoordinatorBridgePresenter;
 
 @end
 
@@ -92,9 +98,9 @@
     self.mainNavigationItem.title = nil;
     self.rightBarButtonItem.title = NSLocalizedStringFromTable(@"auth_register", @"Vector", nil);
     
-    self.defaultHomeServerUrl = [[NSUserDefaults standardUserDefaults] objectForKey:@"homeserverurl"];
+    self.defaultHomeServerUrl = RiotSettings.shared.homeserverUrlString;
     
-    self.defaultIdentityServerUrl = [[NSUserDefaults standardUserDefaults] objectForKey:@"identityserverurl"];
+    self.defaultIdentityServerUrl = RiotSettings.shared.identityServerUrlString;
     
     self.welcomeImageView.image = [UIImage imageNamed:@"horizontal_logo"];
     
@@ -112,6 +118,13 @@
     
     [self.customServersTickButton setImage:[UIImage imageNamed:@"selection_untick"] forState:UIControlStateNormal];
     [self.customServersTickButton setImage:[UIImage imageNamed:@"selection_untick"] forState:UIControlStateHighlighted];
+    
+    if (!BuildSettings.authScreenShowRegister)
+    {
+        self.rightBarButtonItem.enabled = NO;
+        self.rightBarButtonItem.title = nil;
+    }
+    self.serverOptionsContainer.hidden = !BuildSettings.authScreenShowCustomServerOptions;
     
     [self hideCustomServers:YES];
 
@@ -422,7 +435,9 @@
         // The right bar button is used to switch the authentication type.
         if (self.authType == MXKAuthenticationTypeLogin)
         {
-            if (!authInputsview.isSingleSignOnRequired && !self.softLogoutCredentials)
+            if (!authInputsview.isSingleSignOnRequired
+                && !self.softLogoutCredentials
+                && BuildSettings.authScreenShowRegister)
             {
                 self.rightBarButtonItem.title = NSLocalizedStringFromTable(@"auth_register", @"Vector", nil);
             }
@@ -879,34 +894,19 @@
 
 - (void)onSuccessfulLogin:(MXCredentials*)credentials
 {
-    // Check whether a third party identifiers has not been used
-    if ([self.authInputsView isKindOfClass:AuthInputsView.class])
+    //  if really login and pin protection is forced
+    if (self.authType == MXKAuthenticationTypeLogin && [PinCodePreferences shared].forcePinProtection)
     {
-        AuthInputsView *authInputsview = (AuthInputsView*)self.authInputsView;
-        if (authInputsview.isThirdPartyIdentifierPending)
-        {
-            // Alert user
-            if (alert)
-            {
-                [alert dismissViewControllerAnimated:NO completion:nil];
-            }
-            
-            alert = [UIAlertController alertControllerWithTitle:NSLocalizedStringFromTable(@"warning", @"Vector", nil) message:NSLocalizedStringFromTable(@"auth_add_email_and_phone_warning", @"Vector", nil) preferredStyle:UIAlertControllerStyleAlert];
-            
-            [alert addAction:[UIAlertAction actionWithTitle:[NSBundle mxk_localizedStringForKey:@"ok"]
-                                                             style:UIAlertActionStyleDefault
-                                                           handler:^(UIAlertAction * action) {
-                                                               
-                                                               [super onSuccessfulLogin:credentials];
-                                                               
-                                                           }]];
-            
-            [self presentViewController:alert animated:YES completion:nil];
-            return;
-        }
+        loginCredentials = credentials;
+        
+        SetPinCoordinatorBridgePresenter *presenter = [[SetPinCoordinatorBridgePresenter alloc] initWithSession:nil viewMode:SetPinCoordinatorViewModeSetPin];
+        presenter.delegate = self;
+        [presenter presentFrom:self animated:YES];
+        self.setPinCoordinatorBridgePresenter = presenter;
+        return;
     }
     
-    [super onSuccessfulLogin:credentials];
+    [self afterSetPinFlowCompletedWithCredentials:credentials];
 }
 
 - (void)updateForgotPwdButtonVisibility
@@ -931,13 +931,59 @@
     }
 }
 
+- (void)afterSetPinFlowCompletedWithCredentials:(MXCredentials*)credentials
+{
+    // Check whether a third party identifiers has not been used
+    if ([self.authInputsView isKindOfClass:AuthInputsView.class])
+    {
+        AuthInputsView *authInputsview = (AuthInputsView*)self.authInputsView;
+        if (authInputsview.isThirdPartyIdentifierPending)
+        {
+            // Alert user
+            if (alert)
+            {
+                [alert dismissViewControllerAnimated:NO completion:nil];
+            }
+            
+            alert = [UIAlertController alertControllerWithTitle:NSLocalizedStringFromTable(@"warning", @"Vector", nil) message:NSLocalizedStringFromTable(@"auth_add_email_and_phone_warning", @"Vector", nil) preferredStyle:UIAlertControllerStyleAlert];
+            
+            [alert addAction:[UIAlertAction actionWithTitle:[NSBundle mxk_localizedStringForKey:@"ok"]
+                                                             style:UIAlertActionStyleDefault
+                                                           handler:^(UIAlertAction * action) {
+                                                               
+                [super onSuccessfulLogin:credentials];
+                                                               
+                                                           }]];
+            
+            [self presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+    }
+    
+    [super onSuccessfulLogin:credentials];
+}
+
 #pragma mark -
 
 - (void)updateRegistrationScreenWithThirdPartyIdentifiersHidden:(BOOL)thirdPartyIdentifiersHidden
 {
     self.skipButton.hidden = thirdPartyIdentifiersHidden;
     
-    self.serverOptionsContainer.hidden = !thirdPartyIdentifiersHidden;
+    // Do not display the skip button if the 3PID is mandatory
+    if (!thirdPartyIdentifiersHidden)
+    {
+        if ([self.authInputsView isKindOfClass:AuthInputsView.class])
+        {
+            AuthInputsView *authInputsview = (AuthInputsView*)self.authInputsView;
+            if (authInputsview.isThirdPartyIdentifierRequired)
+            {
+                self.skipButton.hidden = YES;
+            }
+        }
+    }
+    
+    self.serverOptionsContainer.hidden = !thirdPartyIdentifiersHidden
+                                            || !BuildSettings.authScreenShowCustomServerOptions;
     [self refreshContentViewHeightConstraint];
     
     if (thirdPartyIdentifiersHidden)
@@ -1370,6 +1416,27 @@
     [coordinatorBridgePresenter.session.crypto setOutgoingKeyRequestsEnabled:YES onComplete:nil];
     
     [self dismiss];
+}
+
+#pragma mark - SetPinCoordinatorBridgePresenterDelegate
+
+- (void)setPinCoordinatorBridgePresenterDelegateDidComplete:(SetPinCoordinatorBridgePresenter *)coordinatorBridgePresenter
+{
+    [self dismiss];
+
+    [self afterSetPinFlowCompletedWithCredentials:loginCredentials];
+}
+
+- (void)setPinCoordinatorBridgePresenterDelegateDidCancel:(SetPinCoordinatorBridgePresenter *)coordinatorBridgePresenter
+{
+    //  enable the view again
+    [self setUserInteractionEnabled:YES];
+    
+    //  stop the spinner
+    [self.authenticationActivityIndicator stopAnimating];
+    
+    //  then, just close the enter pin screen
+    [coordinatorBridgePresenter dismissWithAnimated:YES completion:nil];
 }
 
 @end
