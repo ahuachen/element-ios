@@ -25,6 +25,34 @@ Build:
 Test:
  * 
 
+Changes in 1.0.4 (2020-08-07)
+=================================================
+
+Features:
+ * 
+
+Improvements:
+ * Upgrade MatrixKit version ([v0.12.11](https://github.com/matrix-org/matrix-ios-kit/releases/tag/v0.12.11)).
+ * 
+
+Bugfix:
+ * 
+
+API Change:
+ * 
+
+Translations:
+ * 
+
+Others:
+ * 
+
+Build:
+ * 
+
+Test:
+ * 
+
 Changes in 1.0.3 (2020-08-05)
 ===============================================
 
